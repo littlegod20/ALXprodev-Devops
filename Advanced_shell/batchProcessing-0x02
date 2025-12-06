@@ -6,40 +6,111 @@ API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
 # Directory to store Pokemon data
 DATA_DIR="pokemon_data"
 
+# Error log file
+ERROR_LOG="pokemon_fetch_errors.log"
+
 # List of Pokemon to fetch
 POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
 
 # Delay between requests (in seconds) to avoid rate limiting
 DELAY=1
 
+# Maximum number of retry attempts
+MAX_RETRIES=3
+
+# Retry delay (in seconds) - exponential backoff
+RETRY_DELAY=2
+
 # Create directory if it doesn't exist
 mkdir -p "$DATA_DIR"
+
+# Initialize or clear error log
+> "$ERROR_LOG"
+
+# Function to make API request with retry logic
+fetch_pokemon_data() {
+    local pokemon=$1
+    local api_url="${API_BASE_URL}/${pokemon}"
+    local output_file="${DATA_DIR}/${pokemon}.json"
+    local attempt=1
+    local success=0
+    
+    while [ $attempt -le $MAX_RETRIES ]; do
+        # Make API request and save to file
+        # -s: silent mode (no progress bar)
+        # -S: show errors even in silent mode
+        # -f: fail silently on HTTP errors (returns error code)
+        # -k: skip SSL certificate verification (may be needed in some environments)
+        # --output: specify output file
+        # --max-time: timeout after 30 seconds
+        curl -s -S -f -k --max-time 30 --output "$output_file" "$api_url" 2>/tmp/curl_error_$$.txt
+        
+        local curl_exit_code=$?
+        local curl_error=$(cat /tmp/curl_error_$$.txt 2>/dev/null || echo "")
+        rm -f /tmp/curl_error_$$.txt
+        
+        # Check if curl was successful and file contains valid data
+        if [ $curl_exit_code -eq 0 ] && [ -f "$output_file" ] && [ -s "$output_file" ]; then
+            # Verify the file contains valid JSON (basic check - starts with {)
+            if head -c 1 "$output_file" | grep -q '{'; then
+                success=1
+                break
+            else
+                # Invalid JSON response
+                if [ $attempt -lt $MAX_RETRIES ]; then
+                    echo "  Attempt $attempt failed: Invalid JSON response. Retrying..." >&2
+                    rm -f "$output_file"
+                fi
+            fi
+        else
+            # Request failed
+            if [ $attempt -lt $MAX_RETRIES ]; then
+                local error_msg="Attempt $attempt failed"
+                if [ -n "$curl_error" ]; then
+                    error_msg="$error_msg: $curl_error"
+                else
+                    case $curl_exit_code in
+                        6) error_msg="$error_msg: Could not resolve host" ;;
+                        7) error_msg="$error_msg: Failed to connect to host" ;;
+                        22) error_msg="$error_msg: HTTP error (Pokemon not found?)" ;;
+                        28) error_msg="$error_msg: Operation timeout" ;;
+                        *) error_msg="$error_msg: Exit code $curl_exit_code" ;;
+                    esac
+                fi
+                echo "  $error_msg. Retrying..." >&2
+                rm -f "$output_file"
+                
+                # Exponential backoff: wait longer with each retry
+                sleep $((RETRY_DELAY * attempt))
+            fi
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    if [ $success -eq 1 ]; then
+        return 0
+    else
+        # All retries failed - log error
+        local final_error="Failed to fetch $pokemon after $MAX_RETRIES attempts"
+        if [ -n "$curl_error" ]; then
+            final_error="$final_error: $curl_error"
+        fi
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $final_error (Exit code: $curl_exit_code)" >> "$ERROR_LOG"
+        rm -f "$output_file"
+        return 1
+    fi
+}
 
 # Loop through each Pokemon
 for pokemon in "${POKEMON_LIST[@]}"; do
     echo "Fetching data for $pokemon..."
     
-    # API URL for this Pokemon
-    API_URL="${API_BASE_URL}/${pokemon}"
-    
-    # Output file path
-    OUTPUT_FILE="${DATA_DIR}/${pokemon}.json"
-    
-    # Make API request and save to file
-    # -s: silent mode (no progress bar)
-    # -S: show errors even in silent mode
-    # -f: fail silently on HTTP errors (returns error code)
-    # -k: skip SSL certificate verification (may be needed in some environments)
-    # --output: specify output file
-    curl -s -S -f -k --output "$OUTPUT_FILE" "$API_URL" 2>/dev/null
-    
-    # Check if curl was successful
-    if [ $? -eq 0 ] && [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
-        echo "Saved data to ${OUTPUT_FILE} ✅"
+    if fetch_pokemon_data "$pokemon"; then
+        echo "Saved data to ${DATA_DIR}/${pokemon}.json ✅"
     else
-        echo "Failed to fetch data for $pokemon ❌"
-        # Remove empty output file if it exists
-        rm -f "$OUTPUT_FILE"
+        echo "Failed to fetch data for $pokemon after $MAX_RETRIES attempts ❌"
+        echo "  Check $ERROR_LOG for details"
     fi
     
     # Add delay between requests to avoid rate limiting (except for the last Pokemon)
@@ -47,4 +118,13 @@ for pokemon in "${POKEMON_LIST[@]}"; do
         sleep "$DELAY"
     fi
 done
+
+# Print summary
+if [ -s "$ERROR_LOG" ]; then
+    echo ""
+    echo "Summary: Some Pokemon failed to fetch. See $ERROR_LOG for details."
+else
+    echo ""
+    echo "Summary: All Pokemon fetched successfully!"
+fi
 

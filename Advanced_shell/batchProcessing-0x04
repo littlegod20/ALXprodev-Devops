@@ -1,0 +1,125 @@
+#!/bin/bash
+
+# Pokemon API base URL
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+
+# Directory to store Pokemon data
+DATA_DIR="pokemon_data"
+
+# Error log file
+ERROR_LOG="pokemon_fetch_errors.log"
+
+# List of Pokemon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Maximum timeout per request (in seconds)
+MAX_TIMEOUT=30
+
+# Create directory if it doesn't exist
+mkdir -p "$DATA_DIR"
+
+# Initialize or clear error log
+> "$ERROR_LOG"
+
+# Array to store background process IDs
+declare -a PIDS=()
+
+# Function to fetch a single Pokemon's data
+fetch_single_pokemon() {
+    local pokemon=$1
+    local api_url="${API_BASE_URL}/${pokemon}"
+    local output_file="${DATA_DIR}/${pokemon}.json"
+    local temp_error="/tmp/curl_error_${pokemon}_$$.txt"
+    
+    echo "Fetching data for $pokemon..." >&2
+    
+    # Make API request and save to file
+    # -s: silent mode (no progress bar)
+    # -S: show errors even in silent mode
+    # -f: fail silently on HTTP errors (returns error code)
+    # -k: skip SSL certificate verification (may be needed in some environments)
+    # --max-time: timeout after specified seconds
+    # --output: specify output file
+    curl -s -S -f -k --max-time "$MAX_TIMEOUT" --output "$output_file" "$api_url" 2>"$temp_error"
+    
+    local curl_exit_code=$?
+    local curl_error=$(cat "$temp_error" 2>/dev/null || echo "")
+    rm -f "$temp_error"
+    
+    # Check if curl was successful and file contains valid data
+    if [ $curl_exit_code -eq 0 ] && [ -f "$output_file" ] && [ -s "$output_file" ]; then
+        # Verify the file contains valid JSON (basic check - starts with {)
+        if head -c 1 "$output_file" | grep -q '{'; then
+            echo "Saved data to ${output_file} ✅" >&2
+            return 0
+        else
+            # Invalid JSON response
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon: Invalid JSON response" >> "$ERROR_LOG"
+            rm -f "$output_file"
+            echo "Failed to fetch data for $pokemon ❌ (Invalid JSON)" >&2
+            return 1
+        fi
+    else
+        # Request failed
+        local error_msg="Failed to fetch $pokemon"
+        if [ -n "$curl_error" ]; then
+            error_msg="$error_msg: $curl_error"
+        else
+            case $curl_exit_code in
+                6) error_msg="$error_msg: Could not resolve host" ;;
+                7) error_msg="$error_msg: Failed to connect to host" ;;
+                22) error_msg="$error_msg: HTTP error (Pokemon not found?)" ;;
+                28) error_msg="$error_msg: Operation timeout" ;;
+                *) error_msg="$error_msg: Exit code $curl_exit_code" ;;
+            esac
+        fi
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $error_msg" >> "$ERROR_LOG"
+        rm -f "$output_file"
+        echo "Failed to fetch data for $pokemon ❌" >&2
+        return 1
+    fi
+}
+
+# Export function and variables so they're available to background processes
+export -f fetch_single_pokemon
+export API_BASE_URL DATA_DIR ERROR_LOG MAX_TIMEOUT
+
+echo "Starting parallel fetch for ${#POKEMON_LIST[@]} Pokemon..."
+echo ""
+
+# Launch all fetch operations in parallel as background processes
+for pokemon in "${POKEMON_LIST[@]}"; do
+    fetch_single_pokemon "$pokemon" &
+    PIDS+=($!)
+done
+
+echo ""
+echo "Waiting for all processes to complete..."
+
+# Wait for all background processes to finish and capture their exit codes
+FAILED_COUNT=0
+for i in "${!PIDS[@]}"; do
+    pid=${PIDS[$i]}
+    pokemon=${POKEMON_LIST[$i]}
+    
+    # Wait for this specific process and capture its exit code
+    if wait $pid; then
+        # Process succeeded (exit code 0)
+        :
+    else
+        # Process failed (non-zero exit code)
+        FAILED_COUNT=$((FAILED_COUNT + 1))
+    fi
+done
+
+# Print summary
+echo ""
+if [ $FAILED_COUNT -eq 0 ]; then
+    echo "Summary: All Pokemon fetched successfully! ✅"
+else
+    echo "Summary: $FAILED_COUNT out of ${#POKEMON_LIST[@]} Pokemon failed to fetch."
+    if [ -s "$ERROR_LOG" ]; then
+        echo "Check $ERROR_LOG for error details."
+    fi
+fi
+
