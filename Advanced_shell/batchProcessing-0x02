@@ -15,7 +15,7 @@ POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
 # Delay between requests (in seconds) to avoid rate limiting
 DELAY=1
 
-# Maximum number of retry attempts
+# Maximum number of retry attempts (up to 3 times)
 MAX_RETRIES=3
 
 # Retry delay (in seconds) - exponential backoff
