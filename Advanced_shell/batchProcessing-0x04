@@ -96,6 +96,9 @@ done
 echo ""
 echo "Waiting for all processes to complete..."
 
+# Check background jobs status
+jobs > /dev/null 2>&1 || true
+
 # Wait for all background processes to finish and capture their exit codes
 FAILED_COUNT=0
 for i in "${!PIDS[@]}"; do
@@ -111,6 +114,9 @@ for i in "${!PIDS[@]}"; do
         FAILED_COUNT=$((FAILED_COUNT + 1))
     fi
 done
+
+# Wait for all background jobs to complete (ensures all processes finish)
+wait
 
 # Print summary
 echo ""
