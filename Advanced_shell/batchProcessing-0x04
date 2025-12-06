@@ -24,6 +24,19 @@ mkdir -p "$DATA_DIR"
 # Array to store background process IDs
 declare -a PIDS=()
 
+# Cleanup function to kill all background processes on exit
+cleanup() {
+    # Kill any remaining background processes
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
+# Set trap to cleanup on script exit (normal or interrupt)
+trap cleanup EXIT INT TERM
+
 # Function to fetch a single Pokemon's data
 fetch_single_pokemon() {
     local pokemon=$1
